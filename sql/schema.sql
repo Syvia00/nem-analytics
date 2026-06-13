@@ -54,3 +54,44 @@ CREATE TABLE spot_prices_2026_12 PARTITION OF spot_prices
 
 CREATE INDEX ON spot_prices (ts);
 CREATE INDEX ON spot_prices (region, ts);
+
+-- ── Analytics results ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS price_analytics (
+    ts               TIMESTAMPTZ      NOT NULL,
+    region           VARCHAR(10)      NOT NULL,
+    price            NUMERIC(10, 4),
+    demand           NUMERIC(12, 4),
+    rolling_7d_avg   NUMERIC(10, 4),   -- 7-day rolling mean price
+    rolling_7d_vol   NUMERIC(10, 4),   -- 7-day rolling std  price
+    is_peak          BOOLEAN,          -- true = 07:00–21:59 AEST
+    peak_period_avg  NUMERIC(10, 4),   -- avg price for region/month/peak-period group
+    anomaly_score    NUMERIC(10, 6),   -- IsolationForest decision_function (lower = more anomalous)
+    is_anomaly       BOOLEAN,          -- true = flagged by IsolationForest (contamination 0.05)
+    PRIMARY KEY (ts, region)
+);
+
+-- ── Forecast results ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS price_forecast (
+    ds          TIMESTAMPTZ     NOT NULL,   -- forecast interval (AEST)
+    region      VARCHAR(10)     NOT NULL,
+    yhat        NUMERIC(10, 4),             -- point forecast ($/MWh)
+    yhat_lower  NUMERIC(10, 4),             -- 95% lower bound
+    yhat_upper  NUMERIC(10, 4),             -- 95% upper bound
+    run_ts      TIMESTAMPTZ     NOT NULL,   -- when the model was run
+    PRIMARY KEY (ds, region)
+);
+
+-- ── Migrations ────────────────────────────────────────────────────────────────
+
+ALTER TABLE spot_prices ADD COLUMN IF NOT EXISTS available_gen NUMERIC(12, 3);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'spot_prices_ts_region_uniq'
+    ) THEN
+        ALTER TABLE spot_prices ADD CONSTRAINT spot_prices_ts_region_uniq UNIQUE (ts, region);
+    END IF;
+END $$;
