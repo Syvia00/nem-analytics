@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,15 @@ log = logging.getLogger(__name__)
 RAW_DATA_PATH = Path(os.getenv("RAW_DATA_PATH", Path(__file__).parent.parent / "raw_data"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 
+# Date range for backfill — adjust and re-run to load a new month without
+# touching data that is already fully loaded.
+START_DATE = date(2026, 5, 1)
+END_DATE   = date(2026, 5, 31)
+
+# A day is "fully loaded" once every NEM region has this many rows for it.
+_NEM_REGIONS     = {"NSW1", "QLD1", "SA1", "TAS1", "VIC1"}
+_INTERVALS_PER_DAY = 288
+
 # NEM time is AEST (UTC+10), no daylight saving
 _NEM_TZ = ZoneInfo("Australia/Brisbane")
 
@@ -28,6 +37,42 @@ INSERT_SQL = """
     VALUES %s
     ON CONFLICT (ts, region) DO NOTHING
 """
+
+
+def _folder_date(folder: Path) -> date | None:
+    """Extract the calendar date from a PUBLIC_P5MIN_YYYYMMDD folder name."""
+    parts = folder.name.rsplit("_", 1)
+    if len(parts) == 2 and len(parts[1]) == 8:
+        try:
+            return datetime.strptime(parts[1], "%Y%m%d").date()
+        except ValueError:
+            pass
+    return None
+
+
+_FULLY_LOADED_SQL = """
+SELECT day
+FROM (
+    SELECT (ts AT TIME ZONE 'Australia/Brisbane')::date AS day,
+           region,
+           COUNT(*) AS cnt
+    FROM spot_prices
+    GROUP BY 1, 2
+) region_counts
+GROUP BY day
+HAVING COUNT(DISTINCT region) = %(n_regions)s
+   AND MIN(cnt) >= %(intervals)s;
+"""
+
+
+def _fully_loaded_dates(conn) -> set[date]:
+    """Return dates where every NEM region already has a full day of rows."""
+    with conn.cursor() as cur:
+        cur.execute(_FULLY_LOADED_SQL, {
+            "n_regions": len(_NEM_REGIONS),
+            "intervals": _INTERVALS_PER_DAY,
+        })
+        return {row[0] for row in cur.fetchall()}
 
 
 def _parse_nem_dt(s: str) -> datetime:
@@ -78,10 +123,31 @@ def ingest() -> None:
     total_inserted = 0
 
     try:
-        day_folders = sorted(d for d in RAW_DATA_PATH.iterdir() if d.is_dir())
-        log.info("Found %d day folder(s) under %s", len(day_folders), RAW_DATA_PATH)
+        loaded = _fully_loaded_dates(conn)
+        log.info(
+            "Date range : %s → %s", START_DATE, END_DATE,
+        )
+        log.info("Already fully loaded: %d date(s) — will skip", len(loaded))
 
-        for day_folder in day_folders:
+        all_folders = sorted(d for d in RAW_DATA_PATH.iterdir() if d.is_dir())
+
+        # Filter to folders whose date falls within the configured range
+        # and haven't been fully loaded yet.
+        pending = []
+        for folder in all_folders:
+            d = _folder_date(folder)
+            if d is None:
+                continue
+            if d < START_DATE or d > END_DATE:
+                continue
+            if d in loaded:
+                log.debug("Skipping %s — already fully loaded", folder.name)
+                continue
+            pending.append((d, folder))
+
+        log.info("%d day folder(s) to process", len(pending))
+
+        for _, day_folder in pending:
             data_files = sorted(
                 p for p in day_folder.iterdir()
                 if p.suffix.lower() in {".zip", ".csv"}
