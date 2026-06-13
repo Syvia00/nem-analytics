@@ -1,0 +1,16 @@
+pandas
+python-dotenv
+sqlalchemy
+psycopg2-binary
+requests
+scikit-learn
+matplotlib
+seaborn
+prophet
+
+# apache-airflow requires Python >=3.9,<3.13 — not compatible with Python 3.13.
+# Use a Python 3.12 virtual environment or the Docker setup to install Airflow:
+#   python3.12 -m venv .venv && source .venv/bin/activate
+#   pip install "apache-airflow==2.10.4" \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.12.txt"
+apache-airflow
